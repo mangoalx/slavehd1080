@@ -34,15 +34,18 @@ void ledCommand(void);
 void setaddrCommand(void);
 void setbinCommand(void);
 void setvalCommand(void);
+void sethumCommand(void);
 void nullCommand(void);
 void listCommand(void);
 void getvalCommand(void);
+void gethumCommand(void);
 
 /***************************************************
  *  Other functions
  **************************************************/
-void updateValue(int val,byte reg);
-bool compareValue(byte reg,byte TaUpperByte,byte TaLowerByte);              //Compare Ta value against this register value, return true if exceeded
+void updateValue(int val);
+void updateHumid(int val);
+//bool compareValue(byte reg,byte TaUpperByte,byte TaLowerByte);              //Compare Ta value against this register value, return true if exceeded
 /*************************************************************************************************************
      your Command Names Here
 */
@@ -51,9 +54,11 @@ void (*g_pFunctionCmd[])(void)  =  {
   ledCommand,
   setbinCommand,
   setvalCommand,
+  sethumCommand,
   setaddrCommand,
   listCommand,
   getvalCommand,
+  gethumCommand,
 
   nullCommand                     //Keep this extra nullCommand always the last, to process unknown command
                                   //Do not put this command in the Commandlist, it will only be used when unknown command is received
@@ -64,11 +69,12 @@ const char *Commandlist[] = {
   "led",
 
   "setbin",                       //set register value in binary, can access full register map
-  "setval",                       //set register value in decimal (program converts it to the format register needed)
-                                  //can only access temperature registers 2,3,4,5
+  "setval",                       //set temperature register value
+  "sethum",                       //set humidity value                                
   "setaddr",                      //set i2c slave address, is it ok to re-begin with a new address?
   "list",
-  "getval"
+  "getval",                       //get temperature value
+  "gethum"                        //get humidity value
 };
 
 #ifdef HELPTEXTINPROGMEM
@@ -76,10 +82,12 @@ const char *Commandlist[] = {
 const char helpText[] PROGMEM = {"help [command] - to see the help about using command \r\n command list:"};
 const char ledText[] PROGMEM = {"led <0/1> - to turn off/on LED"};
 const char setbinText[] PROGMEM = {"setbin <regAddr> byte0 byte1 ... - fill the registers with data byte0, byte1 ... starting from regAddr, data in HEX format"};
-const char setvalText[] PROGMEM = {"setval <decVal> [regAddr] - set the temperature registers (2,3,4,5) with the decimal value"};
+const char setvalText[] PROGMEM = {"setval <decVal> - set the temperature register with the decimal value"};
+const char sethumText[] PROGMEM = {"sethum <decVal> - set the humidity register with the decimal value"};
 const char setaddrText[] PROGMEM = {"setaddr <addr> - set the slave device's address with addr (in HEX format)"};
 const char listText[] PROGMEM = {"list - list the registers content in HEX format"};
-const char getvalText[] PROGMEM = {"getval [regAddr] - read the temperature registers (2,3,4,5) in decimal format"};
+const char getvalText[] PROGMEM = {"getval - read the temperature register in decimal format"};
+const char gethumText[] PROGMEM = {"gethum - read the humidity register in decimal format"};
 const char nullText[] PROGMEM = {"unknown command - use help without a parameter to see the valid command list"};
 
 void serialProgmemPrint(char *textp){
@@ -99,9 +107,11 @@ const char* const CommandHelp[] = {
   ledText,
   setbinText,
   setvalText,
+  sethumText,
   setaddrText,
   listText,
   getvalText,
+  gethumText,
   nullText  
 };
 #else
@@ -110,10 +120,12 @@ const char* const CommandHelp[] = {
 //  "command list:",
   "led <0/1> - to turn off/on LED",
   "setbin <regAddr> byte0 byte1 ... - fill the registers with data byte0, byte1 ... starting from regAddr, data in HEX format",
-  "setval <decVal> [regAddr] - set the temperature registers (2,3,4,5) with the decimal value",
+  "setval <decVal> - set the temperature register with the decimal value",
+  "sethum <decVal> - set the humidity register with the decimal value",
   "setaddr <addr> - set the slave device's address with addr (in HEX format)",
   "list - list the registers content in HEX format",
-  "getval [regAddr] - read the temperature registers (2,3,4,5) in decimal format",
+  "getval - read the temperature register in decimal format",
+  "gethum - read the humidity register in decimal format",
   "unknown command - use help without a parameter to see the valid command list"
 };
 #endif
@@ -284,34 +296,32 @@ void setbinCommand(){
 }
 
 /****************************************************
- * set temperature value of a temperature register (2,3,4,5)
- * Usage: setval value register  
+ * set temperature value 
+ * Usage: setval value 
  * The value should be integar, and between -256 to 255
- * if register not exists, by default use 5 (Ta)
+ * 
  ******************************************************/
 void setvalCommand(){
-  byte regAddr;
   int Temperature;
 
   Temperature=readNumber();
-  if((nullToken)||(Temperature>255)||(Temperature<-100)){
-    Serial.println(F("Temperature out of range,valid range is -100 to 255"));
+  if((nullToken)||(Temperature>125)||(Temperature<-40)){
+    Serial.println(F("Temperature out of range,valid range is -40 to 125"));
     return;
   }
-  regAddr = readHex();
-  if(nullToken) regAddr = TaRegister;            //if ommitted,read Ta register 
-  if((regAddr<2)||(regAddr>5)) {
-    Serial.println(F("out of range,valid range is 2 to 5"));
+  updateValue(Temperature);
+  
+}
+void sethumCommand(){
+  int humidity;
+
+  humidity=readNumber();
+  if((nullToken)||(humidity>100)||(humidity<0)){
+    Serial.println(F("Humidity out of range,valid range is 0 to 100"));
+    return;
   }
-  else {
-#ifdef VALUEFRACTION
-    updateValue(Temperature*16,regAddr);          //To support fraction (only for A/D data) it needs to be timesed by 16
-#else    
-    updateValue(Temperature,regAddr);
-#endif
-    if(regAddr == TaRegister)                     //If setting Ta value, disable autoUpdating of value from analog input
-      autoUpdateVal=false;
-  }
+  updateHumid(humidity);
+  
 }
 
 // list command to print out full register map in HEX
@@ -325,58 +335,50 @@ void listCommand(void){
 
 void getvalCommand(void){
   byte UpperByte,LowerByte;
-  byte regAddr = readHex();
-  int Temperature=0;
+  unsigned int temp;
+  float Temperature=0;
 
-  if(nullToken) regAddr = TaRegister;            //if ommitted,read Ta register 
-  if((regAddr<2)||(regAddr>5)) {
-    Serial.println(F("out of range,valid range is 2 to 5"));
-  }
-  else {
-    
-    UpperByte=registerMap[regAddr*2];
-    LowerByte=registerMap[regAddr*2+1];
+   
+    UpperByte=registerMap[0];
+    LowerByte=registerMap[1];
 
-#ifdef VALUEFRACTION
-    if ((UpperByte & 0x10) == 0x10)
-      Temperature=-256*16;                            //T A < 0°C, 
-    UpperByte = UpperByte & 0x0F;                     //Clear Flags and sign
-
-    Temperature += UpperByte * 256 + LowerByte;
-
-    Serial.print(F("The value is: "));
-    Serial.print(Temperature/16);
-    LowerByte = Temperature & 0xF;
-    Serial.println(Fraction4bit[LowerByte]);
-    
-#else
-    UpperByte = UpperByte & 0x1F; //Clear flag bits
-    if ((UpperByte & 0x10) == 0x10){ //T A < 0°C
-      UpperByte = UpperByte & 0x0F;                   //Clear SIGN
-
-      Temperature = (UpperByte * 16 + LowerByte / 16);
-      Temperature -= 256;
-    }else
-      Temperature = (UpperByte * 16 + LowerByte / 16);
+    temp = UpperByte * 256 + LowerByte;
+    Temperature = temp*165.0f/65532-40;
 
     Serial.print(F("The value is: "));
     Serial.println(Temperature);
-#endif    
-  }
+    
 }
-/*
-const byte TaRegister=5;             //no.5 register is Temperature ambient, will be used as default pointer value                                       
-const byte TupperReg=2;
-const byte TlowerReg=3;
-const byte TcritReg=4;
-                                       
-#define OutTcritFlag 0x80
-#define OutTupperFlag 0x40
-#define OutTlowerFlag 0x20
-*/
-void updateValue(int val,byte reg){
+void gethumCommand(void){
   byte UpperByte,LowerByte;
+  unsigned int temp;
+  int humidity=0;
 
+   
+    UpperByte=registerMap[2];
+    LowerByte=registerMap[3];
+
+    temp = UpperByte * 256 + LowerByte;
+    humidity = temp*100.0f/65532;
+
+    Serial.print(F("The value is: "));
+    Serial.println(humidity);
+    
+}
+
+
+
+void updateValue(int val){
+  byte UpperByte,LowerByte;
+  unsigned int temp;
+//  float tempf;
+
+  temp = (val + 40.0f)*65532/165.0f;
+  temp += 2;                    //We will remove bit1 and bit0, so add 2, if bit1 is 1 it will be increased to bit2
+
+  UpperByte= temp >> 8;
+  LowerByte= temp & 0xFC;
+/*
 #ifdef VALUEFRACTION
 // When value fraction is enabled, the data val was multipled by 16
   UpperByte = (val>>8)&0x1F;    // Now upper byte should be Val/256, and with 0x1F to keep sign flag
@@ -397,75 +399,52 @@ void updateValue(int val,byte reg){
     if(!compareValue(TlowerReg,UpperByte,LowerByte)) UpperByte|=OutTlowerFlag;      //Here should be lower than, anyway in compareValue() it returns false when Ta<=Tlower.
                                                                 //So, when Ta=Tlower the flag will be set. Think nobody cares this
   }
+*/  
+  registerMap[0]=UpperByte;
+  registerMap[1]=LowerByte;
   
-  registerMap[reg*2]=UpperByte;
-  registerMap[reg*2+1]=LowerByte;
-  
 }
 
-/****************************************************
- * Compare Ta temperture value against 1 of the registers
- *  TupperLimit, TlowerLimit, Tcritical
- *  return true if Ta if greater
-*****************************************************/
+/*
+Temperature Register
+The temperature register is a 16-bit result register in binary format (the 2 LSBs D1 and D0 are always 0). The
+result of the acquisition is always a 14 bit value. The accuracy of the result is related to the selected conversion
+time (refer to Electrical Characteristics (1) ). The temperature can be calculated from the output data with:
 
-bool compareValue(byte reg,byte TaUpperByte,byte TaLowerByte){
-  byte UpperByte,LowerByte;
+Temperature(C) = (TEMPERATURE[15:00]/2**16) * 165 - 40
 
-  UpperByte=registerMap[reg*2];
-  LowerByte=registerMap[reg*2+1];
-
-  //Step 1, compare the sign bit
-  if(((TaUpperByte^UpperByte)&0x10)==0x10)      //Is the sign different?
-  {
-    if((TaUpperByte&0x10)==0x10) return false;  //If so, if Ta<0 then Ta is the less one
-    else return true;
-  }
-  else                                  //So the signs are the same, just compare upper then lower byte
-  {
-    TaUpperByte &= 0x0F;                //Clear any flag or sign bits
-    UpperByte &= 0x0F;
-    if(TaUpperByte>UpperByte) return true;
-    else if(TaUpperByte<UpperByte) return false;
-    else                                //Equal, then compare lower byte
-    {
-      if(TaLowerByte>LowerByte) return true;
-      else return false;
-    }
-  }
-}
-/* This is the sample code from data sheet of MCP9808
-i2c_start(); // send START command
-i2c_write (AddressByte & 0xFE); //WRITE Command (see Section 4.1.4 “Address Byte”)
-i2c_write(0x05); // Write T A Register Address
-//also, make sure bit 0 is cleared ‘0’
-i2c_start(); //Repeat START
-i2c_write(AddressByte | 0x01); // READ Command (see Section 4.1.4 “Address Byte”)
-UpperByte = i2c_read(ACK); // READ 8 bits
-LowerByte = i2c_read(NAK); // READ 8 bits
-i2c_stop(); // send STOP command
-//also, make sure bit 0 is Set ‘1’
-//and Send ACK bit
-//and Send NAK bit
-//Convert the temperature data
-//First Check flag bits
-if ((UpperByte & 0x80) == 0x80){
-//T A 3 T CRIT
-}
-if ((UpperByte & 0x40) == 0x40){
-//T A > T UPPER
-}
-if ((UpperByte & 0x20) == 0x20){
-//T A < T LOWER
-}
-UpperByte = UpperByte & 0x1F; //Clear flag bits
-if ((UpperByte & 0x10) == 0x10){ //T A < 0°C
-UpperByte = UpperByte & 0x0F;
-//Clear SIGN
-Temperature = 256 - (UpperByte x 16 + LowerByte / 16);
-}else
-//T A
-3 0°C
-Temperature = (UpperByte x 16 + LowerByte / 16);
-//Temperature = Ambient Temperature (°C)
+Temperature Register Description (0x00)
+Description
+[15:02] Temperature measurement (read only)
+[01:00] Reserved, always 0 (read only
 */
+
+void updateHumid(int hum){
+  byte UpperByte,LowerByte;
+  unsigned int temp;
+//  float tempf;
+
+  temp = hum/100.0f*65532;
+  temp += 2;                    //We will remove bit1 and bit0, so add 2, if bit1 is 1 it will be increased to bit2
+  UpperByte= temp >> 8;
+  LowerByte= temp & 0xFC;
+
+  registerMap[2]=UpperByte;
+  registerMap[3]=LowerByte;
+  
+}
+
+/*
+Humidity Register
+The humidity register is a 16-bit result register in binary format (the 2 LSBs D1 and D0 are always 0). The
+result of the acquisition is always a 14 bit value. The accuracy of the result is related to the selected conversion
+time (refer to Electrical Characteristics (1) ). The temperature can be calculated from the output data with:
+
+Relative Humidity(% RH) = (HUMIDITY[15:00]/2**16) * 165 - 40
+
+Humidity Register Description (0x01)
+Description
+[15:02] relative humidity measurement (read only)
+[01:00] Reserved, always 0 (read only
+*/
+
